@@ -7,7 +7,7 @@
 
 #define PORT 3550 /* El puerto que será abierto */
 #define BACKLOG 1 /* El número de conexiones permitidas */
-#define VHOSTDIR "/etc/nginx/sites.d/"
+#define SITESD "/etc/nginx/sites.d/"
 #define BUFFER_SIZE 1024
 
 /********************************
@@ -44,7 +44,7 @@ char nginx_systemctl(int action){	//0 stop, 1 start, 2 reload
 	return atoi(status);
 }
 
-void add_site(char *buffer_rx, int fd_client){
+int add_site(char *buffer_rx, int fd_client){
 	/* Agrega un sitio a la configuracion del NGINX */
 	char site_name[100];
 	char default_domain[100];
@@ -55,44 +55,60 @@ void add_site(char *buffer_rx, int fd_client){
 	char site_path[100];
 	char buffer_tx[BUFFER_SIZE];
 
+
+	
+	parce_data(buffer_rx,&pos,site_name);
+	parce_data(buffer_rx,&pos,default_domain);
+
+	sprintf(site_path,"%s/%s.conf",SITESD,site_name);
+	printf("Abriendo archivo: %s\n",site_path);
 	fd = fopen(site_path,"w");
+	if(!fd){
+		printf("Problemas para escribir el archivo %s\n",site_path);
+		send(fd_client,"0", BUFFER_SIZE,0);
+		return 0;
+	}
 
 	parce_data(buffer_rx,&pos,aux); //site_id
 	fprintf(fd,"#ID %s\n",aux);
 	parce_data(buffer_rx,&pos,aux); //site_ver
 	fprintf(fd,"#VER %s\n",aux);
-	
-	parce_data(buffer_rx,&pos,site_name);
-	parce_data(buffer_rx,&pos,default_domain);
-	fprintf(fd,"upstream %s {workers_\n",site_name);
+
+	printf("PASO1\n");
 	/* Indicamos que estamos listos para recibir los workers */
 	/* Ojo que con esto eliminamos el buffer_rx anterior */
+	fprintf(fd,"upstream %s {\n",site_name);
 	do{
-		strcpy(buffer_tx,"1|");
-		send(fd_client,buffer_tx, BUFFER_SIZE,0);
+		send(fd_client,"1", BUFFER_SIZE,0);
 		recv(fd_client,buffer_rx,BUFFER_SIZE,0);
 		pos=2;
 		while(pos < strlen(buffer_rx)){
 			parce_data(buffer_rx,&pos,aux);
-			fprintf(fd,"\tserver %s {\n",aux);
+			fprintf(fd,"\tserver %s;\n",aux);
 		}
-	} while(buffer_rx[0] != 0);
+		printf("buffer_rx -%s\n-",buffer_rx);
+	} while(buffer_rx[0] != '0');
+	printf("PASO2\n");
 
 	fprintf(fd,"}\n");
 	fprintf(fd,"server {\n");
 	fprintf(fd,"\tlisten 80;\n");
-	fprintf(fd,"\tserver_name %s.$s;\n",site_name,default_domain);
+	fprintf(fd,"\tserver_name %s.%s;\n",site_name,default_domain);
+
 	/* Aca van los server name/alias */
+	printf("PASO3\n");
 	do{
-		strcpy(buffer_tx,"1|");
-		send(fd_client,buffer_tx, BUFFER_SIZE,0);
+		send(fd_client,"1", BUFFER_SIZE,0);
 		recv(fd_client,buffer_rx,BUFFER_SIZE,0);
 		pos=2;
 		while(pos < strlen(buffer_rx)){
 			parce_data(buffer_rx,&pos,aux);
 			fprintf(fd,"\tserver_name %s;\n",aux);
 		}
-	} while(buffer_rx[0] != 0);
+		printf("buffer_rx -%s\n-",buffer_rx);
+	} while(buffer_rx[0] != '0');
+	send(fd_client,"1", BUFFER_SIZE,0);
+	printf("PASO4\n");
 
 	fprintf(fd,"\tlocation / {\n");
 	fprintf(fd,"\t\tproxy_pass http://workers_%s;\n",site_name);
@@ -101,7 +117,9 @@ void add_site(char *buffer_rx, int fd_client){
 	fprintf(fd,"\t}\n");
 	fprintf(fd,"}\n");
 	
+	printf("PASO5\n");
 	fclose(fd);
+	return 1;
 }
 
 void del_site(char *buffer_rx, int fd_client){
@@ -121,6 +139,24 @@ void del_site(char *buffer_rx, int fd_client){
 }
 
 int check(char *detalle){
+	FILE *fp;
+        char buffer[100];
+        int status = 1;
+
+	strcpy(detalle,"todo OK"); // De entrada esta todo bien
+	fp = popen("systemctl status nginx > /dev/null; echo $?", "r");
+	if (fp == NULL) {
+		printf("Fallo al obtener el estado del nginx\n" );
+		status = 0;
+	}
+	fgets(buffer, sizeof(buffer)-1, fp);
+	pclose(fp);
+
+	if(buffer[0] != '0'){
+		strcpy(detalle,"nginx caido");
+		status = 0;
+	}
+	return status;
 }
 
 void statistics(char *aux){
@@ -210,72 +246,67 @@ int main(int argc , char *argv[]){
 		// Aguardamos continuamente que el cliente envie un comando
 		while(recv(fd_client,buffer_rx,BUFFER_SIZE,0)>0){
 			printf("Esperando conneccion desde el cliente()\n"); //Debemos mantener viva la conexion
-			if ((fd_client = accept(fd_server,(struct sockaddr *)&client,&sin_size))<0) {
-				printf("error en accept()\n");
-				return 1;
-			}
-	
-			// Aguardamos continuamente que el cliente envie un comando
-			clear_buffer(buffer_rx);
-			while(recv(fd_client,buffer_rx,BUFFER_SIZE,0)>0){
-				printf("Recibimos -%s-\n",buffer_rx);
-				action = buffer_rx[0];
-				switch(action){
-					case 'A':
-						printf("Agregamos sitio\n");
-						add_site(buffer_rx,fd_client);
-						break;
-					case 'D':
-						del_site(buffer_rx,fd_client);
-					case 'C':
-						printf("Chequeamos el worker\n");
-						if(check(aux) == 1){
-							buffer_tx[0] = '1';
-						} else {
-							buffer_tx[0] = '0';
+			printf("Recibimos -%s-\n",buffer_rx);
+			action = buffer_rx[0];
+			switch(action){
+				case 'A':
+					printf("Agregamos sitio\n");
+					add_site(buffer_rx,fd_client);
+					break;
+				case 'D':
+					del_site(buffer_rx,fd_client);
+					break;
+				case 'C':
+					printf("Chequeamos el worker\n");
+					if(check(aux) == 1){
+						buffer_tx[0] = '1';
+					} else {
+						buffer_tx[0] = '0';
+					}
+					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
+					strcat(buffer_tx,aux);
+					statistics(aux);
+					strcat(buffer_tx,aux);
+
+					printf("Esperando que el cliente reciba los datos\n");
+					cant_bytes = send(fd_client,buffer_tx, BUFFER_SIZE,0);
+					printf("Enviamos(%i) -%s-\n",cant_bytes,buffer_tx);
+					break;
+				case 'S':
+					/* Start Nginx */
+					if(nginx_systemctl(0) == 0){
+						buffer_tx[0] = 1;
+					} else {
+						buffer_tx[0] = 0;
 						}
-						buffer_tx[1] = '|'; buffer_tx[2] = '\0';
-						strcat(buffer_tx,aux);
-						statistics(aux);
-						strcat(buffer_tx,aux);
-	
-						printf("Esperando que el cliente reciba los datos\n");
-						cant_bytes = send(fd_client,buffer_tx, BUFFER_SIZE,0);
-						printf("Enviamos(%i) -%s-\n",cant_bytes,buffer_tx);
-						break;
-					case 'S':
-						/* Start Nginx */
-						if(nginx_systemctl(0) == 0){
-							buffer_tx[0] = 1;
-						} else {
-							buffer_tx[0] = 0;
-							}
-						buffer_tx[1] = '|'; buffer_tx[2] = '\0';
-						send(fd_client,buffer_tx, BUFFER_SIZE,0);
-					case 'K':
-						/* Stop Nginx */
-						if(nginx_systemctl(1) == 0){
-							buffer_tx[0] = 1;
-						} else {
-							buffer_tx[0] = 0;
-							}
-						buffer_tx[1] = '|'; buffer_tx[2] = '\0';
-						send(fd_client,buffer_tx, BUFFER_SIZE,0);
-					case 'R':
-						/* Reload Nginx */
-						if(nginx_systemctl(2) == 0){
-							buffer_tx[0] = 1;
-						} else {
-							buffer_tx[0] = 0;
-							}
-						buffer_tx[1] = '|'; buffer_tx[2] = '\0';
-						send(fd_client,buffer_tx, BUFFER_SIZE,0);
-					default :
-						printf("Error protocolo\n");
-						send(fd_client,"0\0",BUFFER_SIZE,0);
-				}
+					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
+					send(fd_client,buffer_tx, BUFFER_SIZE,0);
+					break;
+				case 'K':
+					/* Stop Nginx */
+					if(nginx_systemctl(1) == 0){
+						buffer_tx[0] = 1;
+					} else {
+						buffer_tx[0] = 0;
+						}
+					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
+					send(fd_client,buffer_tx, BUFFER_SIZE,0);
+					break;
+				case 'R':
+					/* Reload Nginx */
+					if(nginx_systemctl(2) == 0){
+						buffer_tx[0] = 1;
+					} else {
+						buffer_tx[0] = 0;
+						}
+					buffer_tx[1] = '|'; buffer_tx[2] = '\0';
+					send(fd_client,buffer_tx, BUFFER_SIZE,0);
+					break;
+				default :
+					printf("Error protocolo\n");
+					send(fd_client,"0\0",BUFFER_SIZE,0);
 			}
 		}
-		close(fd_client);
 	}
+	close(fd_client);
 }
