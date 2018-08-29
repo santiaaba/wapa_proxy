@@ -4,6 +4,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include "parce.h"
+#include "config.h"
 
 #define PORT 3550 /* El puerto que será abierto */
 #define BACKLOG 1 /* El número de conexiones permitidas */
@@ -44,10 +45,9 @@ char nginx_systemctl(int action){	//0 stop, 1 start, 2 reload
 	return atoi(status);
 }
 
-int add_site(char *buffer_rx, int fd_client){
+int add_site(char *buffer_rx, int fd_client, T_config *c){
 	/* Agrega un sitio a la configuracion del NGINX */
 	char site_name[100];
-	char default_domain[100];
 	char aux[500];
 	int pos=2;
 	char alias[200];
@@ -58,9 +58,8 @@ int add_site(char *buffer_rx, int fd_client){
 
 	
 	parce_data(buffer_rx,&pos,site_name);
-	parce_data(buffer_rx,&pos,default_domain);
 
-	sprintf(site_path,"%s/%s.conf",SITESD,site_name);
+	sprintf(site_path,"%s%s.conf",SITESD,site_name);
 	printf("Abriendo archivo: %s\n",site_path);
 	fd = fopen(site_path,"w");
 	if(!fd){
@@ -93,7 +92,7 @@ int add_site(char *buffer_rx, int fd_client){
 	fprintf(fd,"}\n");
 	fprintf(fd,"server {\n");
 	fprintf(fd,"\tlisten 80;\n");
-	fprintf(fd,"\tserver_name %s.%s;\n",site_name,default_domain);
+	fprintf(fd,"\tserver_name %s.%s;\n",site_name,config_default_domain(c));
 
 	/* Aca van los server name/alias */
 	printf("PASO3\n");
@@ -122,7 +121,7 @@ int add_site(char *buffer_rx, int fd_client){
 	return 1;
 }
 
-void del_site(char *buffer_rx, int fd_client){
+void delete_site(char *buffer_rx, int fd_client){
 	/* Elimina el archivo de configuracion de un sitio */
 	FILE *fp;
 	char command[1000];
@@ -131,11 +130,23 @@ void del_site(char *buffer_rx, int fd_client){
 
 	pos=2;
 	parce_data(buffer_rx,&pos,aux);
-	strcpy(command,"rm VHOSTDIR/ -f ");
-	strcat(command,aux);
+	sprintf(command,"rm %s%s.conf -f",SITESD,aux);
 	printf(command);
-	//fp = popen(command, "r");
-	//pclose(fp);
+	fp = popen(command, "r");
+	pclose(fp);
+	send(fd_client,"1", BUFFER_SIZE,0);
+}
+
+void delete_all(char *buffer_rx, int fd_client){
+	/* Elimina la configuracion de sitios toda */
+	FILE *fp;
+        char command[1000];
+
+	sprintf(command,"rm %s* -f",SITESD);
+	printf(command);
+	fp = popen(command, "r");
+	pclose(fp);
+	send(fd_client,"1", BUFFER_SIZE,0);
 }
 
 int check(char *detalle){
@@ -210,6 +221,7 @@ int main(int argc , char *argv[]){
 	char buffer_tx[BUFFER_SIZE];
 	struct sockaddr_in server;
 	struct sockaddr_in client;
+	T_config config;
 	int sin_size;
 	int pos;
 	char aux[200];
@@ -217,6 +229,8 @@ int main(int argc , char *argv[]){
 	int result;
 	int cant_bytes;
 
+	config_load("proxy_tool.conf",&config);
+	
 	if ((fd_server=socket(AF_INET, SOCK_STREAM, 0)) == -1 ) {
 		printf("error en socket()\n");
 		return 1;
@@ -251,10 +265,13 @@ int main(int argc , char *argv[]){
 			switch(action){
 				case 'A':
 					printf("Agregamos sitio\n");
-					add_site(buffer_rx,fd_client);
+					add_site(buffer_rx,fd_client,&config);
+					break;
+				case 'd':
+					delete_site(buffer_rx,fd_client);
 					break;
 				case 'D':
-					del_site(buffer_rx,fd_client);
+					delete_all(buffer_rx,fd_client);
 					break;
 				case 'C':
 					printf("Chequeamos el worker\n");
