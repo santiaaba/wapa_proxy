@@ -110,7 +110,7 @@ int add_site(char *buffer_rx, int fd_client, T_config *c){
 	printf("PASO4\n");
 
 	fprintf(fd,"\tlocation / {\n");
-	fprintf(fd,"\t\tproxy_pass http://workers_%s;\n",site_name);
+	fprintf(fd,"\t\tproxy_pass http://%s;\n",site_name);
 	fprintf(fd,"\t\tproxy_set_header X-Real-IP $remote_addr;\n");
 	fprintf(fd,"\t\tproxy_set_header Host $http_host;\n");
 	fprintf(fd,"\t}\n");
